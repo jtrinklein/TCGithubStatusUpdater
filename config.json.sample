@@ -1,0 +1,10 @@
+{
+	"repoOwner" : "user",
+	"repo" : "myrepo",
+	"oauthToken" : "mytokenvalue",
+	"tcUser" : "teamcityuser",
+	"tcPwd" : "teamcitypassword",
+	"tcServer" : "teamcity.server.com",
+	"buildTypesToMonitor" : [ "bt0001" ],
+  "appPort" : 8000
+}
