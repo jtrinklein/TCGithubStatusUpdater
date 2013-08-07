@@ -34,9 +34,11 @@ function contains(arr, val) {
 }
 
 ////////////////////////////////////////////////
-function updateCommitStatus(buildId, commitHash, success, buildUrl) {
+function updateCommitStatus(buildId, commitHash, success, buildUrl, msg) {
+  var message = msg || '';
   var state = success ? 'success' : 'failure';
-  var data = '{ "state":"' + state + '", "target_url":"' + buildUrl + '"}';
+  var data = '{ "state":"' + state + '", "target_url":"' + buildUrl + '", "description":"Status set by TeamCity Github Status Updater\n\n' + message + '"}';
+
   var urlHost = 'api.github.com';
   var urlPath = '/repos/' + config.repoOwner + '/' + config.repo + '/statuses/' + commitHash;
   var authHeader = 'token ' + config.oauthToken;
@@ -52,7 +54,7 @@ function updateCommitStatus(buildId, commitHash, success, buildUrl) {
       'Content-Length': data.length
     }
   };
-  
+
   log(buildId, 'sending status update...');
   var request = https.request(options,function(response){   
     response.setEncoding('utf8'); 
@@ -69,23 +71,23 @@ function updateCommitStatus(buildId, commitHash, success, buildUrl) {
   
 }
 
-// Routes
-
-app.post('/gitstatusupdater', function (req,res) {
-  var currTime = new Date() + ' -> ';
-  var buildId = req.body.build.buildId
-  
-   var options = {
+// callback is function with signature function([String] commitId, [Bool] status, [String] webUrl)
+// error is function with signature function([Exception]exception)
+function getBuildStatus(buildId, callback, error) {
+  var options = {
     host : config.tcServer,
     path : '/app/rest/builds/id:' + buildId,
     method : 'GET',
     headers : {
-    'Authorization': 'Basic '+new Buffer(config.tcUser + ':' + config.tcPwd).toString('base64')
+      'Authorization': 'Basic '+new Buffer(config.tcUser + ':' + config.tcPwd).toString('base64')
     }
   };
   var request = http.request(options,function(response){   
     var body = '';
     response.on('error', function(e) {
+	  if(error && typeof error === 'function') {
+	     error(e);
+	  }
       log(buildId, "failed to get build info");
       log(buildId, e.message);
     });
@@ -95,7 +97,7 @@ app.post('/gitstatusupdater', function (req,res) {
       var statusSearchString = 'status="';
       var urlSearchString = 'webUrl="';
       var buildTypeSearchString = 'buildTypeId=';
-      
+     
       var shaIdx = body.indexOf(versionSearchString) + versionSearchString.length;
       var statusIdx = body.indexOf(statusSearchString) + statusSearchString.length;
       var statusEndIdx = body.indexOf('"', statusIdx);
@@ -103,24 +105,85 @@ app.post('/gitstatusupdater', function (req,res) {
       var urlEndIdx = body.indexOf('"', urlIdx);
       var btIdx = body.indexOf(buildTypeSearchString) + buildTypeSearchString.length;
       var btEndIdx = body.indexOf('"', btIdx);
-      
+     
       var buildTypeId = body.substr(btIdx, btEndIdx - btIdx);
-      
-      if(contains(config.buildTypesToMonitor, buildTypeId)) {
-        var commitHash = body.substr(shaIdx, 40); // sha hashes are 40 characters long
-        var success = body.substr(statusIdx, statusEndIdx - statusIdx) == 'SUCCESS';
-        var webUrl = body.substr(urlIdx, urlEndIdx - urlIdx);
-        
-        log(buildId, 'found commit hash: ' + commitHash);
-        
-        updateCommitStatus(buildId, commitHash, success, webUrl);
-      }
-      else {
-        log(buildId, 'ignored build type id: ' + buildTypeId);
+     
+      var commitHash = body.substr(shaIdx, 40); // sha hashes are 40 characters long
+      var success = body.substr(statusIdx, statusEndIdx - statusIdx) == 'SUCCESS';
+      var webUrl = body.substr(urlIdx, urlEndIdx - urlIdx);
+     
+      log(buildId, 'found commit hash: ' + commitHash);
+     
+      if(callback && typeof callback === 'function') {
+        callback(commitHash, success, webUrl);
       }
     });
   });
   request.end();
+}
+
+function checkMasterBuildsStatus(onGreen, onRed, error) {
+  console.log('checking...');
+  var options = {
+    host : config.masterStatusServer,
+    port : config.mssPort,
+    path : '/status',
+    method : 'GET'
+  };
+  var request = http.request(options,function(response){
+    var status = '';
+    response.on('error', function(e) {
+      if(error && typeof error === 'function') {
+         error(e);
+      }
+      log('checkMasterBuildsStatus','failed to get Master builds status');
+      log('checkMasterBuildsStatus',e.message);
+    });
+    response.on('data',function(chunk){ status += chunk; });
+    response.on('end', function(){
+      log('checkMasterBuildsStatus','Master Builds Status: ' + status);
+      if(status === 'RED' && onRed && typeof onRed === 'function'){
+        onRed();
+      }
+      if(status === 'GREEN' && onGreen && typeof onGreen === 'function'){
+        onGreen();
+      }
+    });
+  });
+
+  request.end();
+}
+// Routes
+
+app.post('/gitstatusupdater', function (request,response) {
+  var currTime = new Date() + ' -> ';
+  var buildId = request.body.build.buildId;
+  
+  getBuildStatus(buildId, function(commit, success, url) {
+
+    if(!success) {
+      updateCommitStatus(buildId, commit, success, url);
+      response.send('Build Failure');
+      response.end();
+    }
+    else {
+      checkMasterBuildsStatus(function() {
+        
+        updateCommitStatus(buildId, commit, success, url);
+
+        response.send('Build Passed!');
+        response.end();
+      },function(){
+        
+        var msg = 'Cannot merge when Master builds are red!';
+        updateCommitStatus(buildId, commit, false, url, msg);
+        
+        response.send(msg);
+        response.end();
+      });
+    }
+  });
+  
 });
 
 app.listen(config.appPort);
