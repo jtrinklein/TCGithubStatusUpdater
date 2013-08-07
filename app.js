@@ -126,7 +126,7 @@ function checkMasterBuildsStatus(onGreen, onRed, error) {
   console.log('checking...');
   var options = {
     host : config.masterStatusServer,
-    port : config.mssPort,
+    port : config.masterStatusServerPort,
     path : '/status',
     method : 'GET'
   };

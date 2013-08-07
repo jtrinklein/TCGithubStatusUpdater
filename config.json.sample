@@ -5,6 +5,7 @@
 	"tcUser" : "teamcityuser",
 	"tcPwd" : "teamcitypassword",
 	"tcServer" : "teamcity.server.com",
-	"buildTypesToMonitor" : [ "bt0001" ],
-  "appPort" : 8000
+	"appPort" : 8000,
+	"masterStatusServer" : "status.server.com",
+	"masterStatusServerPort" : 8000
 }
