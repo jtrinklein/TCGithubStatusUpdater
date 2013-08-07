@@ -1,0 +1,11 @@
+{
+  "name": "TeamCity Github Status Updater",
+  "description": "Updates status of commits when TeamCity Builds finish",
+  "author": "James Trinklein <jtrinklein@daptiv.com>",
+  "dependencies": {
+    "express": "2.5.8"
+  },
+  "engines": {
+	  "node": ">= 0.8.6"
+  }
+}
