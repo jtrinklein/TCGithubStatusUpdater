@@ -53,10 +53,11 @@ function buildGithubStatusRequestOptions(repo, commitHash, method, dataOrNull) {
     headers : {
       'Authorization': authHeader,
       'Content-Type': 'application/json',
-      'Content-Length': data.length
     }
   };
-
+  if(data.length > 0) {
+	  options.headers['Content-Length'] = data.length;
+  }
   return options;
 }
 ////////////////////////////////////////////////
@@ -77,7 +78,6 @@ function updateCommitStatus(buildId, repo, commitHash, status, buildUrl, msg) {
     });
 	response.on('data', function(chunk){ body += chunk; });
     response.on('end', function() {
-	  log(buildId, 'body: ' + body);
       log(buildId, 'sent status update: ' + repoString + ' -> ' + state);
     });
   });
@@ -86,11 +86,8 @@ function updateCommitStatus(buildId, repo, commitHash, status, buildUrl, msg) {
 }
 
 function getCommitStatus(repo, commit, onSuccess, onError) {
-  console.log('---repo: ' + repo);
-  console.log('---commit: ' + commit);
   var repoString = repo + ' ' + commit;
   var options = buildGithubStatusRequestOptions(repo, commit, 'GET');
-  log('getStatus', 'getting status for: ' + repoString);
   var request = https.request(options,function(response){  
     var body = '';
     response.setEncoding('utf8'); 
@@ -101,14 +98,10 @@ function getCommitStatus(repo, commit, onSuccess, onError) {
         onError(e);
 	  }
     });
-	response.on('data', function(chunk){ body += chunk; log('getStatus', 'chunk: ' + chunk); });
+	response.on('data', function(chunk){ body += chunk; });
     response.on('end', function() {
-	  
-	  log('getStatus', 'body: ' + body);
-      log('getStatus', 'got status: ' + repoString);
-	  var status = githubStatus.success;
 	  if(onSuccess && typeof onSuccess === 'function') {
-        onSuccess(status);
+        onSuccess(JSON.parse(body));
       }
     });
   });
@@ -145,12 +138,12 @@ function getBuildStatus(buildId, callback, error) {
   request.end();
 }
 
-function checkMasterBuildsStatus(repo, onGreen, onRed, error) {
+function checkMasterStatus(repo, onGreen, onRed, error) {
   console.log('checking master status...');
   var options = {
     host : config.masterStatusServer,
     port : config.masterStatusServerPort,
-    path : '/repo/'+ repo + '/status',
+    path : '/repo/'+ repo.split('/')[1] + '/status',
     method : 'GET'
   };
   var request = http.request(options,function(response){
@@ -159,12 +152,12 @@ function checkMasterBuildsStatus(repo, onGreen, onRed, error) {
       if(error && typeof error === 'function') {
          error(e);
       }
-      log('checkMasterBuildsStatus','failed to get Master builds status');
-      log('checkMasterBuildsStatus',e.message);
+      log('checkMasterStatus','failed to get Master builds status');
+      log('checkMasterStatus',e.message);
     });
     response.on('data',function(chunk){ status += chunk; });
     response.on('end', function(){
-      log('checkMasterBuildsStatus','Master Builds Status: ' + status);
+      log('checkMasterStatus','Master Builds Status: ' + status);
       if(status === 'RED' && onRed && typeof onRed === 'function'){
         onRed();
       }
@@ -204,65 +197,55 @@ function getRepositoryUrl(vcsId, callback) {
 }
 
 // Routes
+
+app.post('/gitstatus/init',function(req,res) {
+	var buildId = req.body.build.buildId;
+	var url = req.body.build.buildStatusUrl;
+	res.send('ok');
+	res.end();
+	setTimeout(function(){
+		getBuildStatus(buildId,function(buildStatus) {
+			var branch = buildStatus.branchName;
+			var commit = buildStatus.revisions.revision[0].version;
+			var vcsId = buildStatus.revisions.revision[0]['vcs-root-instance']['vcs-root-id'];
+			getRepositoryUrl(vcsId, function(repoUrl) {
+				var repo = repoUrl.split(':')[1].split('.')[0];
+				getCommitStatus(repo,commit,function(status){
+					if(status.length === 0) {
+						updateCommitStatus(buildId,repo,commit,'pending',url,'test run in progress');
+					}
+				});
+			});
+		});
+	},10000);
+});
+
 app.post('/gitstatus/update', function(req,res) {
 	var date = new Date();
 	var buildId = req.body.build.buildId;
     var statusText = req.body.build.buildFullName + ' - ' + req.body.build.buildStatus + ' - ' + date.toDateString();
 	var url = req.body.build.buildStatusUrl;
-	var status = req.body.build.buildResult.toLowerCase();
     log(buildId, statusText);
 
 	getBuildStatus(buildId,function(buildStatus) {
 		var branch = buildStatus.branchName;
-		var status = buildStatus.status;
-		console.log(buildStatus.revisions.revision[0]['vcs-root-instance']);
+		var status = buildStatus.status.toLowerCase();
 		var commit = buildStatus.revisions.revision[0].version;
 		var vcsId = buildStatus.revisions.revision[0]['vcs-root-instance']['vcs-root-id'];
+		
 		getRepositoryUrl(vcsId, function(repoUrl) {
 			var repo = repoUrl.split(':')[1].split('.')[0];
-			updateCommitStatus(buildId,repo,commit,status,url,statusText);
+			checkMasterStatus(repo,function(){
+				updateCommitStatus(buildId,repo,commit,status,url,statusText);
+			},function(){
+				updateCommitStatus(buildId,repo,commit,'failure',url,'Cannot pull when master is red!');
+			});
 		});
 	});
-	res.send(logMsg);
+	res.send('ok');
 	res.end();
 });
 
-app.post('/gitstatus/repo/:repo/update', function (request,response) {
-  var date = new Date();
-  var currTime = date + ' -> ';
-  var buildId = request.body.build.buildId;
-  var repo = request.params.repo;
-  
-  getBuildStatus(buildId, function(commit, success, url) {
-    var statusText = request.body.build.buildFullName + ' - ' + request.body.build.buildStatus + ' - ' + date.toDateString();
-    if(!success) {
-      updateCommitStatus(repo, buildId, commit, githubStatus.failure, url, statusText);
-      response.send('Build Failure');
-      response.end();
-    }
-    else {
-      checkMasterBuildsStatus(repo, function() {
-        
-        updateCommitStatus(repo, buildId, commit, githubStatus.success, url, statusText);
-
-        response.send('Build Passed!');
-        response.end();
-      },function(){
-        
-        var msg = 'Cannot merge when Master builds are red!';
-        updateCommitStatus(repo, buildId, commit, githubStatus.failure, url, msg);
-        
-        response.send(msg);
-        response.end();
-      });
-    }
-  }, function(err){
-	  console.log(err);
-	  response.send(err);
-	  response.end();
-  });
-  
-});
 
 app.listen(config.appPort);
 console.log("TC GitHub Status Updater listening on port %d in %s mode", app.address().port, app.settings.env);
