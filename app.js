@@ -8,6 +8,7 @@ var express = require('express'),
   http = require('http'),
   config = require('./config.json');
 
+var githubStatus = {success: 'success', failure: 'failure', pending: 'pending'};
 var app = module.exports = express.createServer();
 
 // Configuration
@@ -26,49 +27,85 @@ app.configure('production', function(){
 
 ////////////// Utility functions ///////////////
 function log(buildId, message) {
-  console.log('[' + buildId + '] ' + message);
+  var date = new Date();
+
+  console.log(date.getDate() + '/' + date.getMonth() + 
+		  ' ' + date.getHours() + ':' + date.getMinutes() + '.' + date.getSeconds() + 
+		  ' [' + buildId + '] ' + message);
 }
 
 function contains(arr, val) {
   return (arr.indexOf(val) != -1);
 }
 
-////////////////////////////////////////////////
-function updateCommitStatus(buildId, commitHash, success, buildUrl, msg) {
-  var message = msg || '';
-  var state = success ? 'success' : 'failure';
-  var data = '{ "state":"' + state + '", "target_url":"' + buildUrl + '", "description":"Status set by TeamCity Github Status Updater\n\n' + message + '"}';
+function buildGithubStatusRequestOptions(repo, commitHash, method, dataOrNull) {
+  var data = dataOrNull || '';
 
   var urlHost = 'api.github.com';
-  var urlPath = '/repos/' + config.repoOwner + '/' + config.repo + '/statuses/' + commitHash;
+  var urlPath = '/repos/' + repo + '/statuses/' + commitHash;
   var authHeader = 'token ' + config.oauthToken;
   
   var options = {
     host : urlHost,
     port : 443,
     path : urlPath,
-    method : 'POST',
+    method : method,
     headers : {
       'Authorization': authHeader,
       'Content-Type': 'application/json',
-      'Content-Length': data.length
     }
   };
+  if(data.length > 0) {
+	  options.headers['Content-Length'] = data.length;
+  }
+  return options;
+}
+////////////////////////////////////////////////
+function updateCommitStatus(buildId, repo, commitHash, status, buildUrl, msg) {
+  var repoString = repo + ' ' + commitHash;
+  var message = msg || '';
+  var state = status.toLowerCase();
+  var data = '{ "state":"' + state + '", "target_url":"' + buildUrl + '", "description":"' + message + '"}';
 
-  log(buildId, 'sending status update...');
-  var request = https.request(options,function(response){   
+  var options = buildGithubStatusRequestOptions(repo, commitHash, 'POST', data);
+  log(buildId, 'sending status update: ' + repoString + ' -> \n' + data);
+  var request = https.request(options,function(response){  
+    var body = '';
     response.setEncoding('utf8'); 
     response.on('error', function(e) {
       log(buildId, 'failed to set commit status.');
       log(buildId, e.message);
     });
+	response.on('data', function(chunk){ body += chunk; });
     response.on('end', function() {
-      log(buildId, 'sent status update: ' + commitHash + ' -> ' + state);
+      log(buildId, 'sent status update: ' + repoString + ' -> ' + state);
     });
   });
   request.write(data);
   request.end();
-  
+}
+
+function getCommitStatus(repo, commit, onSuccess, onError) {
+  var repoString = repo + ' ' + commit;
+  var options = buildGithubStatusRequestOptions(repo, commit, 'GET');
+  var request = https.request(options,function(response){  
+    var body = '';
+    response.setEncoding('utf8'); 
+    response.on('error', function(e) {
+      log('getStatus', 'failed to set commit status.');
+      log('getStatus', e.message);
+	  if(onError && typeof onError === 'function') {
+        onError(e);
+	  }
+    });
+	response.on('data', function(chunk){ body += chunk; });
+    response.on('end', function() {
+	  if(onSuccess && typeof onSuccess === 'function') {
+        onSuccess(JSON.parse(body));
+      }
+    });
+  });
+  request.end();
 }
 
 // callback is function with signature function([String] commitId, [Bool] status, [String] webUrl)
@@ -79,55 +116,34 @@ function getBuildStatus(buildId, callback, error) {
     path : '/app/rest/builds/id:' + buildId,
     method : 'GET',
     headers : {
-      'Authorization': 'Basic '+new Buffer(config.tcUser + ':' + config.tcPwd).toString('base64')
+      'Authorization': 'Basic '+new Buffer(config.tcUser + ':' + config.tcPwd).toString('base64'),
+	  'Accept' : 'application/json'
     }
   };
   var request = http.request(options,function(response){   
     var body = '';
     response.on('error', function(e) {
-	  if(error && typeof error === 'function') {
-	     error(e);
-	  }
       log(buildId, "failed to get build info");
       log(buildId, e.message);
     });
     response.on('data', function(chunk){ body += chunk; });
     response.on('end', function(){
-      var versionSearchString = '<revision version="';
-      var statusSearchString = 'status="';
-      var urlSearchString = 'webUrl="';
-      var buildTypeSearchString = 'buildTypeId=';
-     
-      var shaIdx = body.indexOf(versionSearchString) + versionSearchString.length;
-      var statusIdx = body.indexOf(statusSearchString) + statusSearchString.length;
-      var statusEndIdx = body.indexOf('"', statusIdx);
-      var urlIdx = body.indexOf(urlSearchString) + urlSearchString.length;
-      var urlEndIdx = body.indexOf('"', urlIdx);
-      var btIdx = body.indexOf(buildTypeSearchString) + buildTypeSearchString.length;
-      var btEndIdx = body.indexOf('"', btIdx);
-     
-      var buildTypeId = body.substr(btIdx, btEndIdx - btIdx);
-     
-      var commitHash = body.substr(shaIdx, 40); // sha hashes are 40 characters long
-      var success = body.substr(statusIdx, statusEndIdx - statusIdx) == 'SUCCESS';
-      var webUrl = body.substr(urlIdx, urlEndIdx - urlIdx);
-     
-      log(buildId, 'found commit hash: ' + commitHash);
+	  var build = JSON.parse(body);
      
       if(callback && typeof callback === 'function') {
-        callback(commitHash, success, webUrl);
+		  callback(build);
       }
     });
   });
   request.end();
 }
 
-function checkMasterBuildsStatus(onGreen, onRed, error) {
-  console.log('checking...');
+function checkMasterStatus(repo, onGreen, onRed, error) {
+  console.log('checking master status...');
   var options = {
     host : config.masterStatusServer,
     port : config.masterStatusServerPort,
-    path : '/status',
+    path : '/repo/'+ repo.split('/')[1] + '/status',
     method : 'GET'
   };
   var request = http.request(options,function(response){
@@ -136,16 +152,16 @@ function checkMasterBuildsStatus(onGreen, onRed, error) {
       if(error && typeof error === 'function') {
          error(e);
       }
-      log('checkMasterBuildsStatus','failed to get Master builds status');
-      log('checkMasterBuildsStatus',e.message);
+      log('checkMasterStatus','failed to get Master builds status');
+      log('checkMasterStatus',e.message);
     });
     response.on('data',function(chunk){ status += chunk; });
     response.on('end', function(){
-      log('checkMasterBuildsStatus','Master Builds Status: ' + status);
+      log('checkMasterStatus','Master Builds Status: ' + status);
       if(status === 'RED' && onRed && typeof onRed === 'function'){
         onRed();
       }
-      if(status === 'GREEN' && onGreen && typeof onGreen === 'function'){
+     if(status === 'GREEN' && onGreen && typeof onGreen === 'function'){
         onGreen();
       }
     });
@@ -153,38 +169,83 @@ function checkMasterBuildsStatus(onGreen, onRed, error) {
 
   request.end();
 }
+
+function getRepositoryUrl(vcsId, callback) {
+  var options = {
+    host : config.tcServer,
+    path : '/app/rest/vcs-roots/' + vcsId + '/properties/url',
+    method : 'GET',
+    headers : {
+      'Authorization': 'Basic '+new Buffer(config.tcUser + ':' + config.tcPwd).toString('base64')
+    }
+  };
+  var request = http.request(options,function(response){   
+    var body = '';
+    response.on('error', function(e) {
+      log(buildId, "failed to get vcs root info vcsId: " + vcsId);
+      log(buildId, e.message);
+    });
+    response.on('data', function(chunk){ body += chunk; });
+    response.on('end', function(){
+     
+      if(callback && typeof callback === 'function') {
+		  callback(body);
+      }
+    });
+  });
+  request.end();
+}
+
 // Routes
 
-app.post('/gitstatusupdater', function (request,response) {
-  var currTime = new Date() + ' -> ';
-  var buildId = request.body.build.buildId;
-  
-  getBuildStatus(buildId, function(commit, success, url) {
-
-    if(!success) {
-      updateCommitStatus(buildId, commit, success, url);
-      response.send('Build Failure');
-      response.end();
-    }
-    else {
-      checkMasterBuildsStatus(function() {
-        
-        updateCommitStatus(buildId, commit, success, url);
-
-        response.send('Build Passed!');
-        response.end();
-      },function(){
-        
-        var msg = 'Cannot merge when Master builds are red!';
-        updateCommitStatus(buildId, commit, false, url, msg);
-        
-        response.send(msg);
-        response.end();
-      });
-    }
-  });
-  
+app.post('/gitstatus/init',function(req,res) {
+	var buildId = req.body.build.buildId;
+	var url = req.body.build.buildStatusUrl;
+	res.send('ok');
+	res.end();
+	setTimeout(function(){
+		getBuildStatus(buildId,function(buildStatus) {
+			var branch = buildStatus.branchName;
+			var commit = buildStatus.revisions.revision[0].version;
+			var vcsId = buildStatus.revisions.revision[0]['vcs-root-instance']['vcs-root-id'];
+			getRepositoryUrl(vcsId, function(repoUrl) {
+				var repo = repoUrl.split(':')[1].split('.')[0];
+				getCommitStatus(repo,commit,function(status){
+					if(status.length === 0) {
+						updateCommitStatus(buildId,repo,commit,'pending',url,'test run in progress');
+					}
+				});
+			});
+		});
+	},10000);
 });
+
+app.post('/gitstatus/update', function(req,res) {
+	var date = new Date();
+	var buildId = req.body.build.buildId;
+    var statusText = req.body.build.buildFullName + ' - ' + req.body.build.buildStatus + ' - ' + date.toDateString();
+	var url = req.body.build.buildStatusUrl;
+    log(buildId, statusText);
+
+	getBuildStatus(buildId,function(buildStatus) {
+		var branch = buildStatus.branchName;
+		var status = buildStatus.status.toLowerCase();
+		var commit = buildStatus.revisions.revision[0].version;
+		var vcsId = buildStatus.revisions.revision[0]['vcs-root-instance']['vcs-root-id'];
+		
+		getRepositoryUrl(vcsId, function(repoUrl) {
+			var repo = repoUrl.split(':')[1].split('.')[0];
+			checkMasterStatus(repo,function(){
+				updateCommitStatus(buildId,repo,commit,status,url,statusText);
+			},function(){
+				updateCommitStatus(buildId,repo,commit,'failure',url,'Cannot pull when master is red!');
+			});
+		});
+	});
+	res.send('ok');
+	res.end();
+});
+
 
 app.listen(config.appPort);
 console.log("TC GitHub Status Updater listening on port %d in %s mode", app.address().port, app.settings.env);

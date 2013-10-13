@@ -1,5 +1,5 @@
 {
-  "name": "TeamCity Github Status Updater",
+  "name": "TCGithubStatusUpdater",
   "description": "Updates status of commits when TeamCity Builds finish",
   "author": "James Trinklein <jtrinklein@daptiv.com>",
   "dependencies": {
